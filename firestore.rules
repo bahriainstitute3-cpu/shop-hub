@@ -1,0 +1,148 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'super_admin'];
+    }
+    function isSettingsAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'bahriainstitute3@gmail.com'
+      );
+    }
+    // Keep in sync with SELLER_EMAIL in src/lib/allowedEmails.js.
+    function isSeller() {
+      return isSignedIn() && (
+        request.auth.token.email == 'anusch2026@gmail.com' ||
+        request.auth.token.email == 'bahriainstitute3@gmail.com'
+      );
+    }
+    function canSellProducts() {
+      return isSignedIn() && (
+        isAdmin() ||
+        isSeller() ||
+        (
+          exists(/databases/$(database)/documents/productPermissions/$(request.auth.token.email)) &&
+          get(/databases/$(database)/documents/productPermissions/$(request.auth.token.email)).data.granted == true
+        )
+      );
+    }
+    function hasProductPermission() {
+      return isSignedIn() && (
+        isAdmin() ||
+        isSeller() ||
+        (
+          exists(/databases/$(database)/documents/productPermissions/$(request.auth.token.email)) &&
+          get(/databases/$(database)/documents/productPermissions/$(request.auth.token.email)).data.granted == true
+        )
+      );
+    }
+
+    // Users can read/update their own profile; only admins can change `role` or `blocked`.
+    // Note: email/password signup is restricted to ALLOWED_EMAILS in the app's
+    // signup() function; Google sign-in is open to any account. Both create
+    // this same /users/{uid} doc, so the rule below allows any signed-in
+    // owner to create their own profile.
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin() || isSettingsAdmin();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Catalog: public read. Admins can write anything; the seller account can
+    // additionally create/edit/delete products (their "Add Product" feature).
+    match /categories/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /products/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() &&
+        request.resource.data.ownerEmail == request.auth.token.email &&
+        hasProductPermission();
+      allow update: if isSignedIn() && (
+        (resource.data.ownerEmail == request.auth.token.email && hasProductPermission()) ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingAvg', 'ratingCount'])
+      );
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.ownerEmail == request.auth.token.email && hasProductPermission());
+    }
+
+    // Orders: a customer can create their own order and read only their own
+    // orders; only admins can update status/payment or read all orders.
+    match /orders/{id} {
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    // Coupons, banners, delivery zones, settings, admin activity logs: admin-only.
+    match /coupons/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /discounts/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /banners/{id} { allow read: if true; allow write: if isAdmin() || isSettingsAdmin(); }
+    match /deliveryZones/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /users/{userId}/addresses/{addressId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow create, update, delete: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+    }
+    match /appSettings/{id} { allow read: if true; allow write: if isAdmin() || isSettingsAdmin(); }
+    match /adminActivityLogs/{id} { allow read, write: if isAdmin(); }
+
+    match /productPermissions/{email} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin() || (isSignedIn() && request.auth.token.email == email);
+      allow delete: if isAdmin();
+    }
+
+    match /wishlists/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow create, update: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+    }
+
+    match /notifications/{id} {
+      allow read: if isSignedIn() && (
+        resource.data.recipientEmail == request.auth.token.email ||
+        resource.data.recipientEmail == "all" ||
+        isAdmin()
+      );
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (resource.data.recipientEmail == request.auth.token.email || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /reviews/{id} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    // In-app chat between a buyer and the product's seller. Only the two
+    // participants (matched by uid or email) can read/write a conversation.
+    match /conversations/{convId} {
+      function isParticipant() {
+        return isSignedIn() && (
+          resource.data.buyerId == request.auth.uid ||
+          resource.data.sellerEmail == request.auth.token.email
+        );
+      }
+      allow create: if isSignedIn() && request.resource.data.buyerId == request.auth.uid;
+      allow read, update: if isParticipant();
+
+      match /messages/{msgId} {
+        function isConvParticipant() {
+          let conv = get(/databases/$(database)/documents/conversations/$(convId)).data;
+          return isSignedIn() && (conv.buyerId == request.auth.uid || conv.sellerEmail == request.auth.token.email);
+        }
+        allow read: if isConvParticipant();
+        allow create: if isConvParticipant() && request.resource.data.senderId == request.auth.uid;
+      }
+    }
+  }
+}
