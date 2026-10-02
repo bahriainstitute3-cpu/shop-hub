@@ -1,4 +1,4 @@
-# ShopHub
+# Trelqo
 
 A real, working shopping app: React + Vite frontend, Firebase (Auth + Firestore) backend.
 No mock data — everything you see is read from and written to your Firestore project.
